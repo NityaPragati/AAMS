@@ -48,3 +48,4 @@ coverage/
 # Project-specific generated data
 ai/data/registered_faces/
 ai/logs/
+frontend/node_modules

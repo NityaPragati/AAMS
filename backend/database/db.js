@@ -5,10 +5,13 @@ let poolConfig;
 
 if (config.DB.connectionString) {
   poolConfig = {
-    connectionString: config.DB.connectionString,
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000
+  connectionString: config.DB.connectionString,
+  ssl: {
+    rejectUnauthorized: false
+  },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000
   };
   console.log('[DB] Using DATABASE_URL connection string');
 } else {

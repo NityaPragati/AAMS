@@ -27,7 +27,7 @@ class PipelineConfig:
     FACE_INPUT_SIZE: tuple = (160, 160)
 
     # ── Level 2A: Liveness / Anti-Spoofing ──
-    LIVENESS_THRESHOLD: float = 0.55
+    LIVENESS_THRESHOLD: float = 0.48
     LIVENESS_TEXTURE_ANALYSIS: bool = True
     LIVENESS_BLINK_DETECTION: bool = False
     EAR_THRESHOLD: float = 0.21
@@ -35,8 +35,8 @@ class PipelineConfig:
     LBP_POINTS: int = 24
     LAPLACIAN_VARIANCE_THRESHOLD: float = 25.0
     MIN_VIDEO_SEQUENCE_FRAMES: int = 5
-    MIN_VIDEO_LIVE_FRAMES: int = 3
-    VIDEO_EAR_DELTA_THRESHOLD: float = 0.055
+    MIN_VIDEO_LIVE_FRAMES: int = 2
+    VIDEO_EAR_DELTA_THRESHOLD: float = 0.028
     VIDEO_NOSE_DELTA_THRESHOLD: float = 0.06
     VIDEO_MOUTH_DELTA_THRESHOLD: float = 0.06
     VIDEO_ROLL_DELTA_THRESHOLD: float = 6.0

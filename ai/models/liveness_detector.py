@@ -157,14 +157,18 @@ class LivenessDetector:
         elif mouth_motion:
             final_score = float(np.clip(avg_frame_score + 0.02, 0.0, 1.0))
         elif head_motion:
-            final_score = float(np.clip(avg_frame_score - 0.12, 0.0, 1.0))
+            final_score = float(np.clip(avg_frame_score + 0.03, 0.0, 1.0))
         else:
             final_score = float(np.clip(avg_frame_score - 0.16, 0.0, 1.0))
 
         is_live = (
             live_frames >= min_live_frames and
-            avg_frame_score >= (self.config.LIVENESS_THRESHOLD - 0.01) and
-            blink_detected
+            avg_frame_score >= (self.config.LIVENESS_THRESHOLD - 0.05) and
+            (
+                blink_detected or
+                mouth_motion or
+                head_motion
+            )
         )
 
         detail_bits = []
@@ -180,11 +184,10 @@ class LivenessDetector:
         if not blink_detected:
             detail_bits.append("blink required")
 
-        detail = (
-            f"Sequence {'PASSED' if is_live else 'FAILED'} "
-            f"({live_frames}/{len(analyzed)} live frames, evidence={', '.join(detail_bits)})"
-        )
-        self.logger.info(detail)
+        if is_live:
+            detail = "LIVE_VERIFIED"
+        else:
+            detail = "VERIFICATION_FAILED"
 
         return {
             "is_live": is_live,

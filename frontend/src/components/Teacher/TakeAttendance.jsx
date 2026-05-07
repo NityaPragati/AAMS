@@ -296,12 +296,31 @@ const TakeAttendance = function() {
 
         setLiveMessage(name + (data.already_marked ? ' already marked' : ' marked present'));
       } else {
-        setLiveMessage(data && data.error ? String(data.error) : 'Looking for a registered face');
-      }
+        const err = String(data?.error || '').toLowerCase();
+
+        if (err.includes('no face')) {
+          setLiveMessage('');
+        }
+        else if (err.includes('spoof') || err.includes('failed')) {
+          setLiveMessage('Verification Failed');
+        }
+        else {
+          setLiveMessage('Face Not Recognized');
+        }
+    }
     } catch (e) {
-      const msg = e.response?.data?.error || 'Scan failed';
-      setFaceResult({ success: false, matched: false, error: msg });
-      setLiveMessage(String(msg));
+      const msg = String(e.response?.data?.error || '').toLowerCase();
+        setFaceResult({
+          success: false,
+          matched: false
+        });
+
+        if (msg.includes('no face')) {
+          setLiveMessage('');
+        }
+        else {
+          setLiveMessage('Verification Failed');
+        }
     } finally {
       setBusy(false);
       busyRef.current = false;
@@ -607,8 +626,8 @@ const TakeAttendance = function() {
                     ) : (
                       <>
                         <div className="scan-result-icon idle"><FiXCircle size={30} /></div>
-                        <h2>{faceResult && faceResult.error ? String(faceResult.error) : 'No Match Yet'}</h2>
-                        <p>{scannerRunning ? 'Scanner is watching the live feed' : 'Scanner is paused'}</p>
+                        <h2>{faceResult?.matched? 'Attendance Marked': liveMessage || ''}</h2>
+                        <p></p>
                       </>
                     )}
                   </div>

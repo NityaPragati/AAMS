@@ -187,7 +187,7 @@ async def verify_video(req: Base64VideoRequest):
     if not req.frames:
         raise HTTPException(400, "frames are required")
     try:
-        images = [ip.load_from_base64(frame) for frame in req.frames[:5]]
+        images = [ip.load_from_base64(frame) for frame in req.frames[:12]]
         return pipeline.verify_faces_from_frames(images)
     except HTTPException:
         raise

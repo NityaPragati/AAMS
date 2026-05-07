@@ -1,5 +1,5 @@
 import axios from 'axios';
-const BASE = 'http://localhost:8000';
+const BASE = process.env.REACT_APP_API_URL;
 const api = axios.create({ baseURL: `${BASE}/api`, headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
 
 api.interceptors.request.use(c => {

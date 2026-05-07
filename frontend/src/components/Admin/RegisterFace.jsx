@@ -13,8 +13,8 @@ import {
   FiUsers
 } from 'react-icons/fi';
 
-const TARGET_SAMPLES = 5;
-const MIN_SAMPLES = 3;
+const TARGET_SAMPLES = 7;
+const MIN_SAMPLES = 4;
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const RegisterFace = () => {
@@ -101,7 +101,7 @@ const RegisterFace = () => {
       <div className="ph">
         <div>
           <h1><FiUserPlus style={{ marginRight: 10, color: 'var(--m500)' }} /> Register Faces</h1>
-          <p>Build student recognition profiles from live video</p>
+          <p>Build student recognition profiles from live video. Ask the student to blink during capture.</p>
         </div>
       </div>
 
@@ -118,7 +118,7 @@ const RegisterFace = () => {
               <div className="cam-off">
                 <div className="cam-off-ic"><FiCamera size={44} /></div>
                 <h3>Camera Off</h3>
-                <p>Use live video to build the face profile</p>
+                      <p>Use live video to build the face profile with active liveness checks. A blink is required.</p>
                 <button className="btn btn-p btn-lg" onClick={() => setCamOn(true)}>
                   <FiCamera size={18} /> Start Camera
                 </button>

@@ -11,6 +11,7 @@ import {
   FiPause,
   FiPlay,
   FiSquare,
+  FiRefreshCw,
   FiUserCheck,
   FiUsers,
   FiClock
@@ -20,6 +21,18 @@ const today = function() {
   const d = new Date();
   const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
   return local.toISOString().split('T')[0];
+};
+
+const wait = function(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+};
+
+const BURST_FRAMES = 8;
+const BURST_DELAY_MS = 180;
+const QR_POLL_MS = 3000;
+
+const buildQrImageUrl = function(payload) {
+  return 'https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=12&data=' + encodeURIComponent(payload);
 };
 
 const faceBoxStyle = function(faceBox) {
@@ -68,14 +81,41 @@ const TakeAttendance = function() {
   const scanTimer = useRef(null);
   const busyRef = useRef(false);
   const markedIdsRef = useRef(new Set());
+  const qrRefreshTimer = useRef(null);
+  const qrPollTimer = useRef(null);
+  const qrCountdownTimer = useRef(null);
+  const qrSeenClaimsRef = useRef(new Set());
+  const qrLoadingRef = useRef(false);
 
   const [manualStatus, setManualStatus] = useState({});
   const [savingManual, setSavingManual] = useState(false);
-  const [qrInput, setQrInput] = useState('');
+  const [qrSession, setQrSession] = useState(null);
+  const [qrStatus, setQrStatus] = useState(null);
+  const [qrCountdown, setQrCountdown] = useState(0);
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrError, setQrError] = useState('');
 
   useEffect(function() {
     busyRef.current = busy;
   }, [busy]);
+
+  useEffect(function() {
+    qrLoadingRef.current = qrLoading;
+  }, [qrLoading]);
+
+  const captureBurst = useCallback(async function() {
+    const frames = [];
+    for (let i = 0; i < BURST_FRAMES; i += 1) {
+      const shot = webcamRef.current ? webcamRef.current.getScreenshot() : null;
+      if (shot) {
+        frames.push(cleanBase64(shot));
+      }
+      if (i < BURST_FRAMES - 1) {
+        await wait(BURST_DELAY_MS);
+      }
+    }
+    return frames;
+  }, []);
 
   function stopAll() {
     setScannerRunning(false);
@@ -88,6 +128,95 @@ const TakeAttendance = function() {
     }
   }
 
+  const clearQrTimers = useCallback(function() {
+    if (qrRefreshTimer.current) {
+      clearTimeout(qrRefreshTimer.current);
+      qrRefreshTimer.current = null;
+    }
+    if (qrPollTimer.current) {
+      clearInterval(qrPollTimer.current);
+      qrPollTimer.current = null;
+    }
+    if (qrCountdownTimer.current) {
+      clearInterval(qrCountdownTimer.current);
+      qrCountdownTimer.current = null;
+    }
+  }, []);
+
+  const pushQrScans = useCallback(function(scans) {
+    if (!Array.isArray(scans) || scans.length === 0) return;
+
+    const fresh = [];
+    for (let i = scans.length - 1; i >= 0; i -= 1) {
+      const scan = scans[i];
+      const claimId = String(scan.claim_id);
+      if (qrSeenClaimsRef.current.has(claimId)) continue;
+      qrSeenClaimsRef.current.add(claimId);
+      markedIdsRef.current.add(String(scan.student_db_id));
+      fresh.push({
+        claim_id: scan.claim_id,
+        student_name: scan.student_name,
+        student_id: scan.student_roll,
+        student_db_id: scan.student_db_id,
+        attendance_status: scan.attendance_status || 'present',
+        method: 'qr',
+        time: new Date(scan.scanned_at).toLocaleTimeString()
+      });
+      toast.success(String(scan.student_name || 'Student') + ' marked present via QR');
+    }
+
+    if (fresh.length > 0) {
+      setScanHistory(function(prev) {
+        return fresh.reverse().concat(prev);
+      });
+    }
+  }, []);
+
+  const loadQrSessionStatus = useCallback(async function(sessionId) {
+    try {
+      const r = await attendanceAPI.getQrSessionStatus(sessionId);
+      const session = r.data && r.data.session ? r.data.session : null;
+      if (!session) return;
+      setQrError('');
+      setQrStatus(session);
+      pushQrScans(session.scans || []);
+    } catch (e) {
+      setQrError(e.response?.data?.error || 'Failed to refresh QR attendance');
+    }
+  }, [pushQrScans]);
+
+  const createQrSession = useCallback(async function() {
+    if (!cid || qrLoadingRef.current) return;
+
+    qrLoadingRef.current = true;
+    setQrLoading(true);
+    setQrError('');
+    try {
+      const r = await attendanceAPI.createQrSession({ class_section_id: parseInt(cid) });
+      const data = r.data;
+      setQrSession(data);
+      setQrStatus({
+        session_id: data.session_id,
+        class_section_id: data.class_section_id,
+        class_name: data.class_name,
+        section: data.section,
+        subject: data.subject,
+        display_code: data.display_code,
+        expires_at: data.expires_at,
+        active: true,
+        total_scans: 0,
+        total_qr_present_today: 0,
+        scans: []
+      });
+      setQrCountdown(data.ttl_seconds || 30);
+    } catch (e) {
+      setQrError(e.response?.data?.error || 'Failed to create QR session');
+    } finally {
+      qrLoadingRef.current = false;
+      setQrLoading(false);
+    }
+  }, [cid]);
+
   useEffect(function() {
     classAPI.getByTeacher()
       .then(function(r) { setSections(r.data.classes || []); })
@@ -97,8 +226,14 @@ const TakeAttendance = function() {
 
   useEffect(function() {
     markedIdsRef.current = new Set();
+    qrSeenClaimsRef.current = new Set();
     setScanHistory([]);
     setFaceResult(null);
+    clearQrTimers();
+    setQrSession(null);
+    setQrStatus(null);
+    setQrCountdown(0);
+    setQrError('');
     if (cid) {
       classAPI.getStudents(parseInt(cid))
         .then(function(r) {
@@ -112,19 +247,22 @@ const TakeAttendance = function() {
     } else {
       setStudents([]);
     }
-  }, [cid]);
+  }, [cid, clearQrTimers]);
 
   const scanOnce = useCallback(async function() {
     if (!cid || !webcamRef.current || busyRef.current) return;
 
-    const img = webcamRef.current.getScreenshot();
-    if (!img) return;
-
     setBusy(true);
     busyRef.current = true;
+    setLiveMessage('Blink once and keep your face steady');
 
     try {
-      const r = await faceAPI.verifyVideo([cleanBase64(img)], parseInt(cid));
+      const frames = await captureBurst();
+      if (frames.length < 2) {
+        throw new Error('Need a clearer burst from the camera');
+      }
+
+      const r = await faceAPI.verifyVideo(frames, parseInt(cid));
       const data = r.data;
 
       setFaceResult(data);
@@ -132,7 +270,7 @@ const TakeAttendance = function() {
       if (data && data.success && data.matched) {
         const key = String(data.student_db_id || data.person_id || data.student_id);
         const name = String(data.student_name || 'Student');
-        const status = data.attendance_status || 'present';
+        const status = data.attendance_status || (data.attendance_marked ? 'present' : 'not_marked');
 
         if (!markedIdsRef.current.has(key)) {
           markedIdsRef.current.add(key);
@@ -156,7 +294,7 @@ const TakeAttendance = function() {
           }
         }
 
-        setLiveMessage(name + (data.already_marked ? ' already marked' : ' recognized'));
+        setLiveMessage(name + (data.already_marked ? ' already marked' : ' marked present'));
       } else {
         setLiveMessage(data && data.error ? String(data.error) : 'Looking for a registered face');
       }
@@ -168,7 +306,7 @@ const TakeAttendance = function() {
       setBusy(false);
       busyRef.current = false;
     }
-  }, [cid]);
+  }, [captureBurst, cid]);
 
   useEffect(function() {
     if (!scannerRunning || !camOn || !cid) return undefined;
@@ -191,6 +329,52 @@ const TakeAttendance = function() {
       }
     };
   }, [scannerRunning, camOn, cid, scanOnce]);
+
+  useEffect(function() {
+    if (method !== 'qr' || !cid) {
+      clearQrTimers();
+      setQrSession(null);
+      setQrStatus(null);
+      setQrCountdown(0);
+      setQrError('');
+      return undefined;
+    }
+
+    createQrSession();
+    return function() {
+      clearQrTimers();
+    };
+  }, [method, cid, createQrSession, clearQrTimers]);
+
+  useEffect(function() {
+    if (method !== 'qr' || !qrSession || !qrSession.session_id) return undefined;
+
+    clearQrTimers();
+
+    const syncCountdown = function() {
+      const remaining = Math.max(
+        0,
+        Math.ceil((new Date(qrSession.expires_at).getTime() - Date.now()) / 1000)
+      );
+      setQrCountdown(remaining);
+      return remaining;
+    };
+
+    const remaining = syncCountdown();
+    loadQrSessionStatus(qrSession.session_id);
+
+    qrCountdownTimer.current = setInterval(syncCountdown, 1000);
+    qrPollTimer.current = setInterval(function() {
+      loadQrSessionStatus(qrSession.session_id);
+    }, QR_POLL_MS);
+    qrRefreshTimer.current = setTimeout(function() {
+      createQrSession();
+    }, Math.max(1000, (remaining * 1000) + 250));
+
+    return function() {
+      clearQrTimers();
+    };
+  }, [method, qrSession, clearQrTimers, createQrSession, loadQrSessionStatus]);
 
   function startScanning() {
     if (!cid) {
@@ -235,39 +419,6 @@ const TakeAttendance = function() {
     }
   }
 
-  async function handleQR() {
-    if (!qrInput.trim()) {
-      toast.error('Enter a student ID');
-      return;
-    }
-    if (!cid) {
-      toast.error('Select a section');
-      return;
-    }
-    try {
-      await attendanceAPI.markManual({
-        student_id: qrInput.trim(),
-        class_section_id: parseInt(cid),
-        date: today(),
-        status: 'present',
-        marked_by: 'qr'
-      });
-      toast.success('Marked present: ' + qrInput);
-      setScanHistory(function(prev) {
-        return [{
-          student_name: qrInput,
-          status: 'present',
-          time: new Date().toLocaleTimeString(),
-          method: 'qr'
-        }].concat(prev);
-      });
-      setQrInput('');
-    } catch (e) {
-      const msg = e.response && e.response.data ? String(e.response.data.error || 'QR marking failed') : 'QR marking failed';
-      toast.error(msg);
-    }
-  }
-
   if (ld) {
     return (
       <div className="loader-full"><div className="spinner" /><span>Loading...</span></div>
@@ -277,15 +428,17 @@ const TakeAttendance = function() {
   const recognizedKeys = new Set(scanHistory.map(function(h) {
     return String(h.student_db_id || h.person_id || h.student_id);
   }));
-  const remainingCount = Math.max(students.length - scanHistory.length, 0);
+  const recognizedCount = recognizedKeys.size;
+  const remainingCount = Math.max(students.length - recognizedKeys.size, 0);
   const activeFaceBox = faceBoxStyle(faceResult && faceResult.face_box);
+  const qrHistory = scanHistory.filter(function(h) { return h.method === 'qr'; });
 
   return (
     <div className="fade">
       <div className="ph">
         <div>
           <h1><FiCamera style={{ marginRight: 10, color: 'var(--m500)' }} /> Take Attendance</h1>
-          <p>Live recognition with a clean roster view</p>
+          <p>Live recognition with stricter anti-spoofing. Students must blink once during scan.</p>
         </div>
       </div>
 
@@ -396,12 +549,12 @@ const TakeAttendance = function() {
                         </div>
                         <div className={'scan-status-panel ' + (faceResult && faceResult.matched ? 'ok' : '')}>
                           <strong>{liveMessage}</strong>
-                          <span>{scanHistory.length}/{students.length} recognized</span>
+                          <span>{recognizedCount}/{students.length} recognized</span>
                         </div>
                       </div>
 
                       <div className="scan-metrics scan-metrics-two">
-                        <div><span>Recognized</span><strong>{scanHistory.length}</strong></div>
+                        <div><span>Recognized</span><strong>{recognizedCount}</strong></div>
                         <div><span>Roster</span><strong>{students.length}</strong></div>
                       </div>
 
@@ -438,7 +591,7 @@ const TakeAttendance = function() {
                           <div className="vr-item">
                             <span>Status</span>
                             <strong style={{ color: faceResult.attendance_status === 'present' ? 'var(--ok)' : 'var(--warn)' }}>
-                              {String(faceResult.attendance_status || 'present').toUpperCase()}
+                              {String(faceResult.attendance_status || (faceResult.attendance_marked ? 'present' : 'not_marked')).toUpperCase()}
                             </strong>
                           </div>
                           <div className="vr-item">
@@ -463,7 +616,7 @@ const TakeAttendance = function() {
 
                 <div className="card" style={{ marginTop: 20 }}>
                   <div className="card-h">
-                    <h3><FiCheckCircle size={17} /> Recognized ({scanHistory.length})</h3>
+                    <h3><FiCheckCircle size={17} /> Recognized ({recognizedCount})</h3>
                     {scanHistory.length > 0 && (
                       <button
                         className="btn btn-g btn-sm"
@@ -490,8 +643,8 @@ const TakeAttendance = function() {
                               <p>{String(h.student_name || 'Student')}</p>
                               <span><FiClock size={11} /> {String(h.time || '')}</span>
                             </div>
-                            <span className={'badge ' + (h.attendance_status === 'pending_review' ? 'b-warn' : 'b-ok')}>
-                              {String(h.attendance_status || h.status || 'present')}
+                            <span className={'badge ' + (h.attendance_status === 'present' ? 'b-ok' : 'b-warn')}>
+                              {String(h.attendance_status || h.status || 'not_marked')}
                             </span>
                           </div>
                         );
@@ -531,20 +684,130 @@ const TakeAttendance = function() {
           )}
 
           {method === 'qr' && (
-            <div className="card">
-              <div className="card-h"><h3>QR Code / Student ID Entry</h3></div>
-              <div className="card-b">
-                <div style={{ display: 'flex', gap: 12, maxWidth: 500 }}>
-                  <input
-                    className="fi"
-                    placeholder="Enter Student ID"
-                    value={qrInput}
-                    onChange={function(e) { setQrInput(e.target.value); }}
-                    onKeyDown={function(e) { if (e.key === 'Enter') handleQR(); }}
-                    style={{ flex: 1 }}
-                    autoFocus
-                  />
-                  <button className="btn btn-p" onClick={handleQR}>Mark Present</button>
+            <div className="g-2col">
+              <div className="card live-card">
+                <div className="card-h">
+                  <h3><FiCamera size={17} /> Rotating QR Attendance</h3>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className={'badge ' + (qrCountdown > 8 ? 'b-ok' : 'b-warn')}>
+                      {qrCountdown > 0 ? qrCountdown + 's left' : 'Refreshing'}
+                    </span>
+                    {qrLoading && <span className="badge b-info">Generating</span>}
+                  </div>
+                </div>
+                <div className="card-b">
+                  {qrSession ? (
+                    <div style={{ textAlign: 'center' }}>
+                      <img
+                        src={buildQrImageUrl(qrSession.payload)}
+                        alt="Attendance QR"
+                        style={{
+                          width: '100%',
+                          maxWidth: 320,
+                          borderRadius: 18,
+                          border: '1px solid var(--g200)',
+                          background: '#fff',
+                          padding: 16
+                        }}
+                      />
+                      <div className="scan-metrics scan-metrics-two" style={{ marginTop: 18 }}>
+                        <div><span>Session scans</span><strong>{qrStatus?.total_scans || 0}</strong></div>
+                        <div><span>Today via QR</span><strong>{qrStatus?.total_qr_present_today || 0}</strong></div>
+                      </div>
+                      <div style={{
+                        marginTop: 18,
+                        padding: 16,
+                        borderRadius: 'var(--r-md)',
+                        background: 'var(--g050)'
+                      }}>
+                        <p style={{ fontSize: 12, color: 'var(--g500)', marginBottom: 6 }}>Fallback code</p>
+                        <strong style={{ fontSize: 28, letterSpacing: 3 }}>{qrSession.display_code}</strong>
+                        <p style={{ fontSize: 12, color: 'var(--g500)', marginTop: 8 }}>
+                          Students must scan in the app within 30 seconds. The code auto-refreshes to reduce cheating.
+                        </p>
+                        <p style={{ fontSize: 11, color: 'var(--g400)', marginTop: 6 }}>
+                          Expires at {new Date(qrSession.expires_at).toLocaleTimeString()}
+                        </p>
+                      </div>
+                      <div className="cam-ctrl" style={{ justifyContent: 'center', marginTop: 18 }}>
+                        <button className="btn btn-p" onClick={createQrSession} disabled={qrLoading}>
+                          <FiRefreshCw size={16} /> Refresh Now
+                        </button>
+                      </div>
+                      {qrError && (
+                        <div className="res-ban rerr" style={{ marginTop: 16 }}>
+                          <FiXCircle size={18} />
+                          <div><p style={{ fontSize: 12 }}>{qrError}</p></div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="cam-off">
+                      <div className="cam-off-ic"><FiCamera size={44} /></div>
+                      <h3>Preparing QR Session</h3>
+                      <p>{qrError || 'Creating a rotating QR window for this section'}</p>
+                      <button className="btn btn-p btn-lg" onClick={createQrSession} disabled={qrLoading}>
+                        <FiRefreshCw size={18} /> {qrLoading ? 'Generating...' : 'Generate QR'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div className="card">
+                  <div className="card-h">
+                    <h3><FiCheckCircle size={17} /> QR Scans ({qrHistory.length})</h3>
+                  </div>
+                  {qrHistory.length === 0 ? (
+                    <div className="empty-state">
+                      Waiting for students to scan the live QR code
+                    </div>
+                  ) : (
+                    <div className="history-list">
+                      {qrHistory.map(function(h, i) {
+                        return (
+                          <div key={String(h.claim_id || i)} className="history-row">
+                            <FiCheckCircle size={16} color="var(--ok)" />
+                            <div style={{ flex: 1 }}>
+                              <p>{String(h.student_name || 'Student')}</p>
+                              <span><FiClock size={11} /> {String(h.time || '')}</span>
+                            </div>
+                            <span className="badge b-ok">
+                              {String(h.attendance_status || 'present')}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="card" style={{ marginTop: 20 }}>
+                  <div className="card-h">
+                    <h3><FiUsers size={17} /> Roster ({remainingCount} waiting)</h3>
+                  </div>
+                  {students.length === 0 ? (
+                    <div className="empty-state">No students in this section</div>
+                  ) : (
+                    <div className="roster-list">
+                      {students.map(function(s) {
+                        const done = recognizedKeys.has(String(s.id));
+                        return (
+                          <div key={s.id} className={'roster-row ' + (done ? 'done' : '')}>
+                            <div className="roster-avatar">{String(s.full_name || 'S').charAt(0)}</div>
+                            <div style={{ flex: 1 }}>
+                              <p>{s.full_name}</p>
+                              <span>{s.student_id}</span>
+                            </div>
+                            <span className={'badge ' + (done ? 'b-ok' : 'b-info')}>
+                              {done ? 'Present' : 'Waiting'}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

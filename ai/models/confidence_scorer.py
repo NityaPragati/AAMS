@@ -1,13 +1,9 @@
 """
-███ LEVEL 3: Confidence Scoring & Failure Handling ███
-"Operates with quantifiable confidence levels, moving away from
- binary decisions. Provides actionable logs for supervisors to
- review ambiguous entries."
+Level 3 confidence scoring.
 
-Three-tier decision system:
-  APPROVED       → High confidence, auto-log attendance
-  PENDING_REVIEW → Ambiguous, flag for human supervisor
-  REJECTED       → Low confidence or failed checks
+The final attendance decision should only be APPROVED when both identity
+matching and liveness are genuinely strong. Borderline matches are sent for
+review instead of being auto-accepted.
 """
 
 import numpy as np
@@ -28,19 +24,6 @@ class ConfidenceScorer:
         liveness_score: float, is_frontal: bool,
         image_quality: Optional[float] = None
     ) -> dict:
-        """
-        Compute weighted confidence from all pipeline stages.
-        
-        Formula:
-          base = w_det * detection + w_rec * recognition + w_live * liveness
-          penalties: non-frontal (-15%), low quality (-10%)
-        
-        Decision thresholds:
-          ≥ 0.82 → APPROVED (high confidence)
-          ≥ 0.68 → APPROVED (standard)
-          ≥ 0.50 → PENDING_REVIEW (ambiguous)
-          < 0.50 → REJECTED
-        """
         base = (
             self.config.DETECTION_WEIGHT * detection_conf +
             self.config.RECOGNITION_WEIGHT * recognition_conf +
@@ -54,15 +37,36 @@ class ConfidenceScorer:
 
         final = float(np.clip(base, 0, 1))
 
-        if final >= self.config.HIGH_CONFIDENCE_THRESHOLD:
+        min_recognition_for_approval = max(
+            self.config.COSINE_SIMILARITY_THRESHOLD + 0.05,
+            self.config.APPROVED_CONFIDENCE_THRESHOLD - 0.03
+        )
+        min_liveness_for_approval = max(
+            self.config.LIVENESS_THRESHOLD,
+            self.config.APPROVED_CONFIDENCE_THRESHOLD - 0.08
+        )
+
+        if (
+            final >= self.config.HIGH_CONFIDENCE_THRESHOLD and
+            recognition_conf >= min_recognition_for_approval and
+            liveness_score >= min_liveness_for_approval
+        ):
             decision = "APPROVED"
             detail = f"High confidence match ({final:.3f})"
-        elif final >= self.config.COSINE_SIMILARITY_THRESHOLD:
+        elif (
+            final >= self.config.APPROVED_CONFIDENCE_THRESHOLD and
+            recognition_conf >= min_recognition_for_approval and
+            liveness_score >= min_liveness_for_approval
+        ):
             decision = "APPROVED"
             detail = f"Standard match ({final:.3f})"
-        elif final >= self.config.PENDING_REVIEW_THRESHOLD:
+        elif (
+            final >= self.config.PENDING_REVIEW_THRESHOLD and
+            recognition_conf >= self.config.COSINE_SIMILARITY_THRESHOLD and
+            liveness_score >= (self.config.LIVENESS_THRESHOLD - 0.05)
+        ):
             decision = "PENDING_REVIEW"
-            detail = f"Ambiguous — flagged for supervisor review ({final:.3f})"
+            detail = f"Ambiguous - flagged for supervisor review ({final:.3f})"
         else:
             decision = "REJECTED"
             detail = f"Below threshold ({final:.3f})"
@@ -70,12 +74,16 @@ class ConfidenceScorer:
         self.logger.info(f"Decision: {decision} | {detail}")
 
         return {
-            "final_score": final, "decision": decision, "detail": detail,
+            "final_score": final,
+            "decision": decision,
+            "detail": detail,
             "breakdown": {
                 "detection": detection_conf,
                 "recognition": recognition_conf,
                 "liveness": liveness_score,
                 "frontal": is_frontal,
-                "quality": image_quality
+                "quality": image_quality,
+                "min_recognition_for_approval": min_recognition_for_approval,
+                "min_liveness_for_approval": min_liveness_for_approval,
             }
         }

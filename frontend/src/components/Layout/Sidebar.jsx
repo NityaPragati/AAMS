@@ -21,6 +21,7 @@ const teacherMenu = [
 
 const studentMenu = [
   { to: '/student/attendance', lb: 'My Attendance', ic: FiClipboard },
+  { to: '/student/scan-qr', lb: 'Scan QR', ic: FiCamera },
   { to: '/student/notifications', lb: 'Notifications', ic: FiBell },
 ];
 

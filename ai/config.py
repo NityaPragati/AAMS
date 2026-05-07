@@ -22,18 +22,24 @@ class PipelineConfig:
     RECOGNITION_MODEL: str = "Facenet"
     # Webcam frames are noisier than controlled ID photos. Keep this strict enough
     # for one-to-one classroom use, but realistic for live browser video.
-    COSINE_SIMILARITY_THRESHOLD: float = 0.45
+    COSINE_SIMILARITY_THRESHOLD: float = 0.58
     EMBEDDING_DIMENSION: int = 128
     FACE_INPUT_SIZE: tuple = (160, 160)
 
     # ── Level 2A: Liveness / Anti-Spoofing ──
-    LIVENESS_THRESHOLD: float = 0.45
+    LIVENESS_THRESHOLD: float = 0.55
     LIVENESS_TEXTURE_ANALYSIS: bool = True
     LIVENESS_BLINK_DETECTION: bool = False
     EAR_THRESHOLD: float = 0.21
     LBP_RADIUS: int = 3
     LBP_POINTS: int = 24
     LAPLACIAN_VARIANCE_THRESHOLD: float = 25.0
+    MIN_VIDEO_SEQUENCE_FRAMES: int = 5
+    MIN_VIDEO_LIVE_FRAMES: int = 3
+    VIDEO_EAR_DELTA_THRESHOLD: float = 0.055
+    VIDEO_NOSE_DELTA_THRESHOLD: float = 0.06
+    VIDEO_MOUTH_DELTA_THRESHOLD: float = 0.06
+    VIDEO_ROLL_DELTA_THRESHOLD: float = 6.0
 
     # ── Level 2B: Pose Estimation ──
     POSE_YAW_LIMIT: float = 30.0
@@ -41,8 +47,9 @@ class PipelineConfig:
     POSE_ROLL_LIMIT: float = 30.0
 
     # ── Level 3: Confidence Scoring ──
-    PENDING_REVIEW_THRESHOLD: float = 0.40
-    HIGH_CONFIDENCE_THRESHOLD: float = 0.70
+    PENDING_REVIEW_THRESHOLD: float = 0.48
+    APPROVED_CONFIDENCE_THRESHOLD: float = 0.63
+    HIGH_CONFIDENCE_THRESHOLD: float = 0.75
     DETECTION_WEIGHT: float = 0.15
     RECOGNITION_WEIGHT: float = 0.65
     LIVENESS_WEIGHT: float = 0.20

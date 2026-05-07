@@ -1,311 +1,514 @@
 """
-LEVEL 2A: Liveness Detection / Anti-Spoofing
+Level 2A liveness detection / anti-spoofing.
 
-Detection of screen-photo spoofing attacks.
-All sub-detectors score 0.0 (spoof) to 1.0 (live).
-Final decision: ALL detectors must return >= 0.30 to pass (AND logic).
-Any single detector < 0.20 is an immediate reject.
-Threshold raised to 0.45 to make it much harder to pass casually.
+This detector is intentionally fail-closed:
+- tiny or invalid crops are rejected instead of passing by default
+- multiple weak sub-signals reject the frame
+- video bursts require a real blink pattern before the face can be accepted
+
+The goal is to stop simple replay attacks such as showing a face photo on a
+phone screen to the webcam.
 """
+
+import math
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from typing import Tuple, Dict
+
 from ..config import PipelineConfig
 from ..utils.logging_utils import setup_logger
 
 
 class LivenessDetector:
+    LEFT_EYE = [36, 37, 38, 39, 40, 41]
+    RIGHT_EYE = [42, 43, 44, 45, 46, 47]
+    NOSE = 30
+    MOUTH_UPPER = 51
+    MOUTH_LOWER = 57
 
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.logger = setup_logger("liveness", config.LOG_FILE, config.LOG_LEVEL)
-        self._sessions: Dict[str, dict] = {}
-        self.logger.info("LivenessDetector ready (moire+specular+color_quant+noise+dynamic)")
+        self.logger.info("LivenessDetector ready (frame + sequence anti-spoofing)")
 
-    def check(self, image: np.ndarray, landmarks: np.ndarray,
-             bbox: Tuple[int, int, int, int],
-             session_id: str = "default") -> dict:
+    def check(
+        self,
+        image: np.ndarray,
+        landmarks: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+        session_id: str = "default",
+    ) -> dict:
+        crop = self._safe_crop(image, bbox, pad=0.18)
+        if crop is None or min(crop.shape[:2]) < 48:
+            return self._frame_result(
+                is_live=False,
+                final_score=0.0,
+                scores=self._neutral_scores(0.0),
+                flags=["small_face"],
+                detail="Face crop is too small for reliable liveness",
+                session_id=session_id,
+            )
 
-        top, right, bottom, left = bbox
-        if (bottom - top) < 20 or (right - left) < 20:
-            return {
-                "is_live": True, "liveness_score": 0.5,
-                "moire_score": 0.5, "specular_score": 0.5,
-                "color_quant_score": 0.5, "noise_score": 0.5,
-                "dynamic_range_score": 0.5, "color_score": 0.5,
-                "detail": "Face crop too small — passing by default"
-            }
-
-        scores = {}
-        scores["moire"]         = self._moire(image, bbox)
-        scores["specular"]      = self._specular(image, bbox)
-        scores["color_quant"]  = self._color_quantization(image, bbox)
-        scores["noise"]         = self._noise_consistency(image, bbox)
-        scores["dynamic_range"] = self._dynamic_range(image, bbox)
-        scores["color"]         = self._color(image, bbox)
-
-        # ── Hard short-circuit: any very low score = immediate reject ───────────
-        HARD_CUTOFF = 0.20
-        for k, v in scores.items():
-            if v < HARD_CUTOFF:
-                self.logger.warning(f"spoof_detected: {k}={v:.3f} < {HARD_CUTOFF}")
-                return {"is_live": False, "liveness_score": float(v), **scores,
-                        "detail": f"spoof_detected ({k}={v:.3f})"}
-
-        # ── Weighted aggregate ───────────────────────────────────────────────────
-        weights = {
-            "moire":          0.30,
-            "specular":       0.20,
-            "color_quant":    0.20,
-            "noise":          0.15,
-            "dynamic_range":  0.10,
-            "color":          0.05,
+        scores = {
+            "moire": self._moire(crop),
+            "specular": self._specular(crop),
+            "color_quant": self._color_quantization(crop),
+            "noise": self._noise_consistency(crop),
+            "dynamic_range": self._dynamic_range(crop),
+            "texture": self._texture_detail(crop),
         }
-        tw = sum(weights[k] for k in scores)
-        final = sum(scores[k] * weights[k] for k in scores) / tw
+        weights = {
+            "texture": 0.24,
+            "moire": 0.22,
+            "specular": 0.18,
+            "color_quant": 0.15,
+            "noise": 0.11,
+            "dynamic_range": 0.10,
+        }
+        final = float(sum(scores[name] * weights[name] for name in weights))
+        low_flags = [name for name, value in scores.items() if value < 0.28]
+        hard_flags = [name for name, value in scores.items() if value < 0.12]
 
-        # ── AND gate: ALL detectors must be reasonably confident ────────────────
-        # Require at least 4/6 detectors above 0.35 (no single detector too low)
-        near_pass = sum(1 for v in scores.values() if v >= 0.35)
-        AND_GATE = near_pass >= 4
-
-        # ── Threshold: raise from 0.30 to 0.45 ─────────────────────────────────
-        live = AND_GATE and (final >= self.config.LIVENESS_THRESHOLD)
-        self.logger.info(
-            f"Liveness {'PASSED' if live else 'FAILED'} | "
-            f"final={final:.3f} >= {self.config.LIVENESS_THRESHOLD} | "
-            f"near_pass={near_pass}/6 | {scores}"
+        is_live = (
+            final >= self.config.LIVENESS_THRESHOLD and
+            len(low_flags) <= 1 and
+            not hard_flags and
+            scores["texture"] >= 0.32 and
+            scores["moire"] >= 0.22
         )
 
-        return {"is_live": live, "liveness_score": float(final), **scores,
-                "detail": f"Liveness {'PASSED' if live else 'FAILED'} ({final:.3f})"}
+        detail = (
+            f"Liveness {'PASSED' if is_live else 'FAILED'} "
+            f"(score={final:.3f}, low={','.join(low_flags) if low_flags else 'none'})"
+        )
+        if not is_live and not low_flags and final < self.config.LIVENESS_THRESHOLD:
+            low_flags = ["aggregate"]
 
-    # ── Private helpers ──────────────────────────────────────────────────────────
+        self.logger.info(
+            "Liveness %s | score=%.3f | session=%s | scores=%s",
+            "PASSED" if is_live else "FAILED",
+            final,
+            session_id,
+            {k: round(v, 3) for k, v in scores.items()},
+        )
 
-    def _safe_crop(self, image: np.ndarray, bbox: Tuple) -> np.ndarray:
+        return self._frame_result(
+            is_live=is_live,
+            final_score=final,
+            scores=scores,
+            flags=low_flags or hard_flags,
+            detail=detail,
+            session_id=session_id,
+        )
+
+    def check_sequence(
+        self,
+        frames: List[np.ndarray],
+        detections: List[dict],
+        session_id: str = "video",
+    ) -> dict:
+        analyzed = []
+        geometry = []
+
+        for index, (image, det) in enumerate(zip(frames, detections)):
+            if not det or det.get("landmarks") is None:
+                continue
+
+            frame_result = self.check(
+                image,
+                det["landmarks"],
+                det["bbox"],
+                session_id=f"{session_id}-{index}",
+            )
+            analyzed.append(frame_result)
+
+            metrics = self._frame_geometry(det["landmarks"])
+            if metrics is not None:
+                geometry.append(metrics)
+
+        if len(analyzed) < self.config.MIN_VIDEO_SEQUENCE_FRAMES:
+            return {
+                "is_live": False,
+                "liveness_score": 0.0,
+                "frames_checked": len(analyzed),
+                "live_frames": sum(1 for item in analyzed if item["is_live"]),
+                "blink_detected": False,
+                "mouth_motion": False,
+                "head_motion": False,
+                "facial_change_detected": False,
+                "frame_scores": [round(item["liveness_score"], 3) for item in analyzed],
+                "detail": f"Need at least {self.config.MIN_VIDEO_SEQUENCE_FRAMES} frames for anti-spoofing",
+            }
+
+        live_frames = sum(1 for item in analyzed if item["is_live"])
+        min_live_frames = max(
+            self.config.MIN_VIDEO_LIVE_FRAMES,
+            int(math.ceil(len(analyzed) * 0.6)),
+        )
+        avg_frame_score = float(np.mean([item["liveness_score"] for item in analyzed]))
+        blink_detected = self._detect_blink(geometry)
+        mouth_motion = self._detect_mouth_motion(geometry)
+        head_motion = self._detect_head_motion(geometry)
+        facial_change_detected = blink_detected or mouth_motion
+
+        if blink_detected:
+            final_score = float(np.clip(avg_frame_score + 0.10, 0.0, 1.0))
+        elif mouth_motion:
+            final_score = float(np.clip(avg_frame_score + 0.02, 0.0, 1.0))
+        elif head_motion:
+            final_score = float(np.clip(avg_frame_score - 0.12, 0.0, 1.0))
+        else:
+            final_score = float(np.clip(avg_frame_score - 0.16, 0.0, 1.0))
+
+        is_live = (
+            live_frames >= min_live_frames and
+            avg_frame_score >= (self.config.LIVENESS_THRESHOLD - 0.01) and
+            blink_detected
+        )
+
+        detail_bits = []
+        if blink_detected:
+            detail_bits.append("blink")
+        if mouth_motion:
+            detail_bits.append("mouth motion")
+        if head_motion:
+            detail_bits.append("head motion")
+        if not detail_bits:
+            detail_bits.append("no active live motion")
+
+        if not blink_detected:
+            detail_bits.append("blink required")
+
+        detail = (
+            f"Sequence {'PASSED' if is_live else 'FAILED'} "
+            f"({live_frames}/{len(analyzed)} live frames, evidence={', '.join(detail_bits)})"
+        )
+        self.logger.info(detail)
+
+        return {
+            "is_live": is_live,
+            "liveness_score": final_score,
+            "frames_checked": len(analyzed),
+            "live_frames": live_frames,
+            "blink_detected": blink_detected,
+            "mouth_motion": mouth_motion,
+            "head_motion": head_motion,
+            "facial_change_detected": facial_change_detected,
+            "frame_scores": [round(item["liveness_score"], 3) for item in analyzed],
+            "detail": detail,
+        }
+
+    def _frame_result(
+        self,
+        is_live: bool,
+        final_score: float,
+        scores: Dict[str, float],
+        flags: List[str],
+        detail: str,
+        session_id: str,
+    ) -> dict:
+        return {
+            "is_live": is_live,
+            "liveness_score": float(np.clip(final_score, 0.0, 1.0)),
+            "moire_score": scores["moire"],
+            "specular_score": scores["specular"],
+            "color_quant_score": scores["color_quant"],
+            "noise_score": scores["noise"],
+            "dynamic_range_score": scores["dynamic_range"],
+            "texture_score": scores["texture"],
+            "risk_flags": flags,
+            "detail": detail,
+            "session_id": session_id,
+        }
+
+    def _neutral_scores(self, value: float) -> Dict[str, float]:
+        return {
+            "moire": value,
+            "specular": value,
+            "color_quant": value,
+            "noise": value,
+            "dynamic_range": value,
+            "texture": value,
+        }
+
+    def _safe_crop(
+        self,
+        image: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+        pad: float = 0.0,
+    ) -> Optional[np.ndarray]:
         top, right, bottom, left = bbox
         h, w = image.shape[:2]
-        top    = max(0, min(top,    h - 1))
-        bottom = max(top + 1, min(bottom, h))
-        left   = max(0, min(left,   w - 1))
-        right  = max(left + 1, min(right, w))
+        pad_h = int(max(0, bottom - top) * pad)
+        pad_w = int(max(0, right - left) * pad)
+
+        top = max(0, min(top - pad_h, h - 1))
+        bottom = max(top + 1, min(bottom + pad_h, h))
+        left = max(0, min(left - pad_w, w - 1))
+        right = max(left + 1, min(right + pad_w, w))
+
         crop = image[top:bottom, left:right]
         return crop if crop.size > 0 else None
 
-    # -------------------------------------------------------------------------
-    # _moire — frequency-domain aliasing / pixel-grid detection
-    # A phone photo has pixel-grid aliasing; a real face has smooth FFT.
-    # -------------------------------------------------------------------------
-    def _moire(self, image: np.ndarray, bbox: Tuple) -> float:
-        crop = self._safe_crop(image, bbox)
-        if crop is None:
-            return 0.5
+    def _moire(self, crop: np.ndarray) -> float:
+        gray = cv2.cvtColor(cv2.resize(crop, (256, 256)), cv2.COLOR_BGR2GRAY).astype(np.float32)
+        gray -= float(np.mean(gray))
+        window = np.outer(np.hanning(gray.shape[0]), np.hanning(gray.shape[1])).astype(np.float32)
+        spectrum = np.fft.fftshift(np.fft.fft2(gray * window))
+        magnitude = np.log1p(np.abs(spectrum))
 
-        gray = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY),
-                         (256, 256)).astype(np.float32)
-
-        # FFT → log-magnitude
-        f = np.fft.fft2(gray)
-        log_mag = np.log1p(np.abs(f))
-
-        h, w = gray.shape
+        h, w = magnitude.shape
         cy, cx = h // 2, w // 2
         y, x = np.ogrid[:h, :w]
+        radius = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
 
-        # Radial ring masks
-        r4  = min(h, w) // 4   # inner ring radius
-        r2  = min(h, w) // 2   # outer ring radius
-        r6  = min(h, w) // 6   # very inner / HF boundary
+        mid_band = magnitude[(radius >= 18) & (radius < 60)]
+        high_band = magnitude[(radius >= 70) & (radius < 105)]
+        horiz_band = magnitude[(np.abs(y - cy) <= 3) & (radius >= 25) & (radius < 110)]
+        vert_band = magnitude[(np.abs(x - cx) <= 3) & (radius >= 25) & (radius < 110)]
 
-        center_mask  = ((x - cx)**2 + (y - cy)**2) <= r4**2
-        inner_mask   = ((x - cx)**2 + (y - cy)**2) <= r2**2 & ~center_mask
-        hf_mask      = ((x - cx)**2 + (y - cy)**2) >= r6**2
-        periphery    = ~inner_mask & ~center_mask
+        if mid_band.size == 0 or high_band.size == 0 or horiz_band.size == 0 or vert_band.size == 0:
+            return 0.5
 
-        total_e    = np.sum(log_mag) + 1e-7
-        center_e   = np.sum(log_mag[center_mask])
-        inner_e    = np.sum(log_mag[inner_mask])
-        hf_e       = np.sum(log_mag[h_f_mask])
-        peri_e     = np.sum(log_mag[periphery])
-        total_minus_c = total_e - center_e
+        peak_ratio = float(np.percentile(mid_band, 97) / (np.mean(mid_band) + 1e-6))
+        high_freq_ratio = float(np.mean(high_band) / (np.mean(mid_band) + 1e-6))
+        axis_ratio = float(max(np.mean(horiz_band), np.mean(vert_band)) / (min(np.mean(horiz_band), np.mean(vert_band)) + 1e-6))
 
-        # Energy ratios
-        center_ratio   = center_e / (peri_e + 1e-7)
-        hf_ratio       = hf_e / (total_minus_c + 1e-7)
-        inner_ratio    = inner_e / (total_minus_c + 1e-7)
-        peak_ratio     = inner_e / (hf_e + 1e-7)
-
-        # ── Scoring ────────────────────────────────────────────────────────────
-        score = 0.5   # start neutral
-
-        # High-frequency ratio: real images are smooth; screen photos are aliased
-        if hf_ratio > 0.25:
-            score -= 0.30
-        if hf_ratio > 0.28:
+        score = 0.90
+        if peak_ratio > 2.70:
             score -= 0.25
+        elif peak_ratio > 2.35:
+            score -= 0.14
 
-        # Inner ring concentration: moire shows as energy集中 in inner ring
-        if inner_ratio > 0.55:
-            score -= 0.25
-        if peak_ratio > 1.6:
-            score -= 0.20
+        if high_freq_ratio > 1.18:
+            score -= 0.28
+        elif high_freq_ratio > 1.05:
+            score -= 0.14
 
-        # Abnormal center vs periphery ratio
-        if center_ratio > 0.60:
-            score -= 0.20
-        if center_ratio > 0.65:
-            score -= 0.20
+        if axis_ratio > 1.35:
+            score -= 0.18
+        elif axis_ratio > 1.22:
+            score -= 0.08
 
         return float(np.clip(score, 0.0, 1.0))
 
-    # -------------------------------------------------------------------------
-    # _specular — specular highlight detection (screen glass reflections)
-    # Phone screen glass creates sharp LED backlight reflections.
-    # -------------------------------------------------------------------------
-    def _specular(self, image: np.ndarray, bbox: Tuple) -> float:
-        crop = self._safe_crop(image, bbox)
-        if crop is None:
-            return 0.5
+    def _specular(self, crop: np.ndarray) -> float:
+        resized = cv2.resize(crop, (160, 160))
+        hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
 
-        gray = cv2.cvtColor(cv2.resize(crop, (128, 128)), cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        glare_mask = (((hsv[:, :, 2] > 235) & (hsv[:, :, 1] < 80)).astype(np.uint8) * 255)
+        bright_ratio = float(np.mean(glare_mask > 0))
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(glare_mask, 8)
+        large_glare = sum(1 for idx in range(1, num_labels) if stats[idx, cv2.CC_STAT_AREA] >= 12)
 
-        # Very bright pixels (glare on glass)
-        _, bright = cv2.threshold(blur, 210, 255, cv2.THRESH_BINARY)
-        bright_ratio = np.sum(bright > 0) / bright.size
+        edges = cv2.Canny(gray, 75, 180)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180.0, threshold=28, minLineLength=18, maxLineGap=4)
+        line_count = 0 if lines is None else len(lines)
 
-        # Sharp edge density (geometric patterns from screen grid)
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        edge_energy = float(np.mean(np.sqrt(sobelx**2 + sobely**2)))
+        score = 0.88
+        if bright_ratio > 0.020:
+            score -= 0.28
+        elif bright_ratio > 0.010:
+            score -= 0.15
 
-        # Line detection — geometric patterns from screen pixel grid
-        edges = cv2.Canny(gray, 50, 150)
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=25,
-                               minLineLength=15, maxLineGap=5)
-        line_count = len(lines) if lines is not None else 0
+        if large_glare >= 2:
+            score -= 0.18
+        elif large_glare == 1 and bright_ratio > 0.010:
+            score -= 0.10
 
-        score = 0.5
-
-        # Screen photo: sharp bright spots (>0.3% of pixels > 210) + high edge energy
-        if bright_ratio > 0.003 and edge_energy > 25:
-            score = 0.15
-        elif bright_ratio > 0.002 and edge_energy > 20:
-            score = 0.25
+        if line_count > 14:
+            score -= 0.18
         elif line_count > 8:
-            score = 0.20   # suspicious geometric grid lines
+            score -= 0.08
 
-        # Real face: diffuse lighting, very few sharp specular spots
-        return float(score)
+        return float(np.clip(score, 0.0, 1.0))
 
-    # -------------------------------------------------------------------------
-    # _color_quantization — detect 8-bit color quantization stair-stepping
-    # Screen output is 8-bit per channel; re-photographed screen keeps artifacts.
-    # -------------------------------------------------------------------------
-    def _color_quantization(self, image: np.ndarray, bbox: Tuple) -> float:
-        crop = self._safe_crop(image, bbox)
-        if crop is None:
-            return 0.5
+    def _color_quantization(self, crop: np.ndarray) -> float:
+        small = cv2.resize(crop, (96, 96))
+        lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
+        penalty = 0.0
 
-        small = cv2.resize(crop, (64, 64))
-        score = 0.0
+        for channel_index in range(3):
+            channel = lab[:, :, channel_index].astype(np.float32)
+            unique_bins = len(np.unique((channel / 4.0).astype(np.uint8)))
+            diffs = np.concatenate([
+                np.abs(np.diff(channel, axis=0)).ravel(),
+                np.abs(np.diff(channel, axis=1)).ravel(),
+            ])
+            tiny_jump_ratio = float(np.mean((diffs > 0) & (diffs <= 2.0)))
 
-        for ch in range(3):
-            channel = small[:, :, ch].astype(np.float32)
-            diff_r = float(np.abs(np.diff(channel, axis=0)).mean())
-            diff_c = float(np.abs(np.diff(channel, axis=1)).mean())
-            total_diff = diff_r + diff_c
-            variance = float(np.var(channel))
+            if unique_bins < 28:
+                penalty += 0.16
+            elif unique_bins < 36:
+                penalty += 0.08
 
-            # Low variance (flat regions) + many small jumps = quantization
-            if variance < 150 and total_diff > 5.0:
-                score += 0.25
-            elif variance < 200 and total_diff > 4.0:
-                score += 0.15
+            if tiny_jump_ratio > 0.48:
+                penalty += 0.10
+            elif tiny_jump_ratio > 0.40:
+                penalty += 0.05
 
-        return float(np.clip(1.0 - score, 0.0, 1.0))
+        return float(np.clip(0.92 - (penalty / 3.0), 0.0, 1.0))
 
-    # -------------------------------------------------------------------------
-    # _noise_consistency — high-frequency noise pattern analysis
-    # Screen photo goes through TWO cameras: screen sensor + webcam sensor.
-    # The noise texture is different from a direct photo.
-    # -------------------------------------------------------------------------
-    def _noise_consistency(self, image: np.ndarray, bbox: Tuple) -> float:
-        crop = self._safe_crop(image, bbox)
-        if crop is None:
-            return 0.5
+    def _noise_consistency(self, crop: np.ndarray) -> float:
+        gray = cv2.cvtColor(cv2.resize(crop, (128, 128)), cv2.COLOR_BGR2GRAY).astype(np.float32)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        high_pass = gray - blur
 
-        gray = cv2.cvtColor(cv2.resize(crop, (128, 128)),
-                          cv2.COLOR_BGR2GRAY).astype(np.float32)
+        noise_std = float(np.std(high_pass))
+        noise_mean = float(np.mean(np.abs(high_pass)))
 
-        # High-pass to isolate noise
-        blur = cv2.GaussianBlur(gray, (7, 7), 0)
-        noise = gray - blur
-
-        noise_std  = float(np.std(noise))
-        noise_mean = float(np.mean(np.abs(noise)))
-
-        score = 0.5
-
-        # Screen photo: double-camera chain = unusual noise texture
-        # Very clean (low noise) = could be direct screen output
-        if noise_std < 2.5:
-            score = 0.15
-        elif noise_std < 3.5:
-            score = 0.25
+        score = 0.88
+        if noise_std < 2.2:
+            score -= 0.28
+        elif noise_std < 3.0:
+            score -= 0.14
+        elif noise_std > 16.0:
+            score -= 0.22
         elif noise_std > 12.0:
-            score = 0.30  # unusually noisy — could be screen photo
+            score -= 0.10
 
-        return float(score)
+        if noise_mean < 1.4:
+            score -= 0.12
 
-    # -------------------------------------------------------------------------
-    # _dynamic_range — histogram analysis for display compression
-    # Screen displays compress dynamic range; photos look unnaturally flat.
-    # -------------------------------------------------------------------------
-    def _dynamic_range(self, image: np.ndarray, bbox: Tuple) -> float:
-        crop = self._safe_crop(image, bbox)
-        if crop is None:
-            return 0.5
+        return float(np.clip(score, 0.0, 1.0))
 
-        gray = cv2.cvtColor(cv2.resize(crop, (128, 128)),
-                          cv2.COLOR_BGR2GRAY).astype(np.float32)
+    def _dynamic_range(self, crop: np.ndarray) -> float:
+        gray = cv2.cvtColor(cv2.resize(crop, (128, 128)), cv2.COLOR_BGR2GRAY).astype(np.float32)
+        p05, p95 = np.percentile(gray, [5, 95])
+        range_ratio = float((p95 - p05) / 255.0)
+        clipped_ratio = float(np.mean((gray <= 4) | (gray >= 251)))
 
-        h_min, h_max = float(gray.min()), float(gray.max())
-        range_ratio = (h_max - h_min) / 255.0
+        hist = cv2.calcHist([gray.astype(np.uint8)], [0], None, [64], [0, 256]).flatten().astype(np.float32)
+        hist /= float(np.sum(hist) + 1e-6)
+        entropy = float(-np.sum(hist * np.log2(hist + 1e-6)))
+        entropy_ratio = entropy / math.log2(64)
 
-        # Histogram entropy — very flat/uniform = compressed DR
-        hist = cv2.calcHist([gray], [0], None, [32], [0, 256]).flatten()
-        hist = (hist / (hist.sum() + 1e-7)).astype(np.float32)
-        hist += 1e-7
-        entropy = float(-np.sum(hist * np.log2(hist)))
-        max_entropy = np.log2(32)
-        entropy_ratio = entropy / max_entropy
+        score = 0.88
+        if range_ratio < 0.18:
+            score -= 0.25
+        elif range_ratio < 0.24:
+            score -= 0.12
+        elif range_ratio > 0.94:
+            score -= 0.12
 
-        score = 0.5
+        if clipped_ratio > 0.08:
+            score -= 0.15
 
-        # Wide range AND very flat histogram = screen display
-        if range_ratio > 0.88 and entropy_ratio > 0.87:
-            score = 0.20
-        elif range_ratio > 0.85 and entropy_ratio > 0.85:
-            score = 0.30
+        if entropy_ratio < 0.55 or entropy_ratio > 0.97:
+            score -= 0.10
 
-        return float(score)
+        return float(np.clip(score, 0.0, 1.0))
 
-    # -------------------------------------------------------------------------
-    # _color — skin chrominance analysis in HSV
-    # -------------------------------------------------------------------------
-    def _color(self, image: np.ndarray, bbox: Tuple) -> float:
-        crop = self._safe_crop(image, bbox)
-        if crop is None:
-            return 0.5
+    def _texture_detail(self, crop: np.ndarray) -> float:
+        gray = cv2.cvtColor(cv2.resize(crop, (128, 128)), cv2.COLOR_BGR2GRAY).astype(np.float32)
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_32F).var())
+        edges = cv2.Canny(gray.astype(np.uint8), 80, 170)
+        edge_ratio = float(np.mean(edges > 0))
 
-        hsv = cv2.cvtColor(cv2.resize(crop, (128, 128)), cv2.COLOR_BGR2HSV)
-        sm = float(np.mean(hsv[:, :, 1]))
-        ss = float(np.std(hsv[:, :, 1]))
+        mean = cv2.blur(gray, (7, 7))
+        mean_sq = cv2.blur(gray * gray, (7, 7))
+        local_std = np.sqrt(np.maximum(mean_sq - (mean * mean), 0))
+        micro_texture = float(np.mean(local_std))
 
-        if 30 < sm < 150 and ss > 15:
-            return 0.80
-        elif sm < 20:
-            return 0.30
-        return 0.55
+        score = 0.90
+        if lap_var < 25.0:
+            score -= 0.32
+        elif lap_var < 45.0:
+            score -= 0.18
+
+        if micro_texture < 8.0:
+            score -= 0.20
+        elif micro_texture < 11.0:
+            score -= 0.10
+
+        if edge_ratio < 0.04 or edge_ratio > 0.20:
+            score -= 0.10
+
+        return float(np.clip(score, 0.0, 1.0))
+
+    def _frame_geometry(self, landmarks: np.ndarray) -> Optional[dict]:
+        if landmarks is None or len(landmarks) <= self.MOUTH_LOWER:
+            return None
+
+        pts = landmarks.astype(np.float32)
+        left_eye = pts[self.LEFT_EYE]
+        right_eye = pts[self.RIGHT_EYE]
+        left_center = np.mean(left_eye, axis=0)
+        right_center = np.mean(right_eye, axis=0)
+        eye_distance = float(np.linalg.norm(right_center - left_center))
+        if eye_distance < 1.0:
+            return None
+
+        eye_center = (left_center + right_center) / 2.0
+        nose = pts[self.NOSE]
+        mouth_upper = pts[self.MOUTH_UPPER]
+        mouth_lower = pts[self.MOUTH_LOWER]
+
+        return {
+            "ear": self._ear(left_eye) * 0.5 + self._ear(right_eye) * 0.5,
+            "nose_offset": float((nose[0] - eye_center[0]) / eye_distance),
+            "mouth_open": float(np.linalg.norm(mouth_lower - mouth_upper) / eye_distance),
+            "roll": float(np.degrees(np.arctan2(
+                right_center[1] - left_center[1],
+                right_center[0] - left_center[0],
+            ))),
+        }
+
+    def _ear(self, eye: np.ndarray) -> float:
+        vertical = np.linalg.norm(eye[1] - eye[5]) + np.linalg.norm(eye[2] - eye[4])
+        horizontal = 2.0 * np.linalg.norm(eye[0] - eye[3])
+        return float(vertical / horizontal) if horizontal > 0 else 0.0
+
+    def _detect_blink(self, geometry: List[dict]) -> bool:
+        if len(geometry) < self.config.MIN_VIDEO_SEQUENCE_FRAMES:
+            return False
+
+        ears = np.array([item["ear"] for item in geometry], dtype=np.float32)
+        if ears.size < self.config.MIN_VIDEO_SEQUENCE_FRAMES:
+            return False
+
+        open_level = float(np.max(ears))
+        min_index = int(np.argmin(ears))
+        min_ear = float(ears[min_index])
+
+        if min_index == 0 or min_index == len(ears) - 1:
+            return False
+
+        left_open = float(np.max(ears[:min_index])) if min_index > 0 else min_ear
+        right_open = float(np.max(ears[min_index + 1:])) if min_index + 1 < len(ears) else min_ear
+        surrounding_open = float(np.median(np.delete(ears, min_index))) if len(ears) > 1 else open_level
+        delta = open_level - min_ear
+
+        return (
+            delta >= self.config.VIDEO_EAR_DELTA_THRESHOLD and
+            min_ear <= min(self.config.EAR_THRESHOLD + 0.01, open_level * 0.76) and
+            (surrounding_open - min_ear) >= (self.config.VIDEO_EAR_DELTA_THRESHOLD * 0.95) and
+            (left_open - min_ear) >= self.config.VIDEO_EAR_DELTA_THRESHOLD and
+            (right_open - min_ear) >= (self.config.VIDEO_EAR_DELTA_THRESHOLD * 0.85)
+        )
+
+    def _detect_mouth_motion(self, geometry: List[dict]) -> bool:
+        if len(geometry) < 2:
+            return False
+
+        mouth_range = float(np.ptp([item["mouth_open"] for item in geometry]))
+        max_open = float(np.max([item["mouth_open"] for item in geometry]))
+
+        return (
+            mouth_range >= self.config.VIDEO_MOUTH_DELTA_THRESHOLD and
+            max_open >= 0.20
+        )
+
+    def _detect_head_motion(self, geometry: List[dict]) -> bool:
+        if len(geometry) < 2:
+            return False
+
+        nose_range = float(np.ptp([item["nose_offset"] for item in geometry]))
+        roll_range = float(np.ptp([item["roll"] for item in geometry]))
+
+        return (
+            nose_range >= self.config.VIDEO_NOSE_DELTA_THRESHOLD or
+            roll_range >= self.config.VIDEO_ROLL_DELTA_THRESHOLD
+        )

@@ -63,9 +63,13 @@ export const faceAPI = {
 export const attendanceAPI = {
   markManual: (d) => api.post('/attendance/mark', d),
   markBulk: (d) => api.post('/attendance/mark-bulk', d),
+  createQrSession: (d) => api.post('/attendance/qr/session', d),
+  getQrSessionStatus: (sessionId) => api.get(`/attendance/qr/session/${sessionId}`),
+  scanQr: (d) => api.post('/attendance/qr/scan', d),
   getByClass: (cid, date) => api.get(`/attendance/class/${cid}`, { params: { date } }),
   getByStudent: (sid, p) => api.get(`/attendance/student/${sid}`, { params: p }),
   getMyAttendance: (p) => api.get('/attendance/my', { params: p }),
+  getMyClasses: () => api.get('/attendance/my-classes'),
   update: (id, d) => api.put(`/attendance/${id}`, d),
   getReport: (cid, s, e) => api.get(`/attendance/report/${cid}`, { params: { start_date: s, end_date: e } }),
 };

@@ -19,6 +19,7 @@ import TakeAttendance from './components/Teacher/TakeAttendance';
 // Student
 import MyAttendance from './components/Student/MyAttendance';
 import Notifications from './components/Student/Notifications';
+import ScanQrAttendance from './components/Student/ScanQrAttendance';
 
 const RoleRoute = ({ children, allowed }) => {
   const { isAuthenticated, user } = useAuth();
@@ -69,6 +70,7 @@ const App = () => {
 
             {/* Student Routes */}
             <Route path="/student/attendance" element={<RoleRoute allowed={['student']}><MyAttendance /></RoleRoute>} />
+            <Route path="/student/scan-qr" element={<RoleRoute allowed={['student']}><ScanQrAttendance /></RoleRoute>} />
             <Route path="/student/notifications" element={<RoleRoute allowed={['student']}><Notifications /></RoleRoute>} />
 
             {/* Default redirect based on role */}

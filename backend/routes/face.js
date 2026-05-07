@@ -25,9 +25,12 @@ async function getStudentById(studentId) {
 
 async function markAttendance(student, classSectionId, result) {
   if (!classSectionId) return null;
+  if (!result || result.decision !== 'APPROVED' || !result.liveness || !result.liveness.is_live) {
+    return null;
+  }
 
   const today = new Date().toISOString().split('T')[0];
-  const status = result.decision === 'APPROVED' ? 'present' : 'pending_review';
+  const status = 'present';
   const existing = await getOne(
     'SELECT id, status FROM attendance_records WHERE student_id = $1 AND class_section_id = $2 AND date = $3',
     [student.id, classSectionId, today]
@@ -92,6 +95,8 @@ async function sendVerificationResponse(res, result, classSectionId) {
     return res.json({
       success: false,
       matched: false,
+      attendance_marked: false,
+      attendance_status: null,
       error: result ? normalizeAiError(result.error) : 'AI service error',
       stage_failed: result ? result.stage_failed : null,
       face_box: result ? result.face_box || null : null,
@@ -99,14 +104,39 @@ async function sendVerificationResponse(res, result, classSectionId) {
     });
   }
 
-  if (!result.matched || !result.person_id) {
+  const approvedLiveMatch = Boolean(
+    result &&
+    result.matched &&
+    result.person_id &&
+    result.decision === 'APPROVED' &&
+    result.liveness &&
+    result.liveness.is_live
+  );
+
+  if (!approvedLiveMatch) {
+    const livenessDetail = result && result.liveness ? String(result.liveness.detail || '') : '';
+    const likelySpoof = (
+      result &&
+      (
+        result.review_required ||
+        result.decision === 'PENDING_REVIEW' ||
+        (result.liveness && result.liveness.is_live === false) ||
+        /spoof|blink|not live/i.test(livenessDetail)
+      )
+    );
+
     return res.json({
       success: true,
       matched: false,
-      error: 'Face not recognized',
+      attendance_marked: false,
+      attendance_status: null,
+      error: likelySpoof
+        ? (result.error || 'Not live - spoof suspected')
+        : 'Face not recognized',
       confidence: result.confidence || 0,
       cosine_similarity: result.cosine_similarity || 0,
       best_person_id: result.best_person_id || null,
+      decision: result.decision || null,
       liveness: result.liveness,
       pose: result.pose,
       face_box: result.face_box || null,
@@ -120,6 +150,8 @@ async function sendVerificationResponse(res, result, classSectionId) {
     return res.json({
       success: true,
       matched: false,
+      attendance_marked: false,
+      attendance_status: null,
       error: 'Face matched but student not in database',
       person_id: result.person_id
     });
@@ -136,6 +168,7 @@ async function sendVerificationResponse(res, result, classSectionId) {
     student_name: student.full_name,
     confidence: result.confidence,
     cosine_similarity: result.cosine_similarity,
+    attendance_marked: Boolean(attendance),
     attendance_status: attendance ? attendance.status : null,
     already_marked: attendance ? attendance.already_marked : false,
     decision: result.decision,

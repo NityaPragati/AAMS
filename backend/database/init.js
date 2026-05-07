@@ -117,6 +117,32 @@ async function initializeDatabase() {
     `);
     console.log('[DB] attendance_records table OK');
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS attendance_qr_sessions (
+        id SERIAL PRIMARY KEY,
+        class_section_id INTEGER NOT NULL REFERENCES class_sections(id) ON DELETE CASCADE,
+        teacher_id INTEGER NOT NULL REFERENCES teachers(id) ON DELETE CASCADE,
+        token_hash TEXT UNIQUE NOT NULL,
+        display_code TEXT UNIQUE NOT NULL,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP NOT NULL
+      )
+    `);
+    console.log('[DB] attendance_qr_sessions table OK');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS attendance_qr_scans (
+        id SERIAL PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES attendance_qr_sessions(id) ON DELETE CASCADE,
+        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        attendance_record_id INTEGER REFERENCES attendance_records(id) ON DELETE SET NULL,
+        scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(session_id, student_id)
+      )
+    `);
+    console.log('[DB] attendance_qr_scans table OK');
+
     try {
       await client.query(`
         CREATE TABLE IF NOT EXISTS face_embeddings (
@@ -135,6 +161,10 @@ async function initializeDatabase() {
     await client.query('CREATE INDEX IF NOT EXISTS idx_att_date ON attendance_records(date)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_att_student ON attendance_records(student_id)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_att_class ON attendance_records(class_section_id)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_qr_session_class ON attendance_qr_sessions(class_section_id)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_qr_session_expiry ON attendance_qr_sessions(expires_at)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_qr_scan_session ON attendance_qr_scans(session_id)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_qr_scan_student ON attendance_qr_scans(student_id)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_stu_sid ON students(student_id)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_usr_email ON users(email)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_enr_class ON enrollments(class_section_id)');

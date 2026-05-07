@@ -12,7 +12,8 @@ module.exports = {
     'http://localhost:5173',
     'http://localhost:8080',
     'http://127.0.0.1:3000',
-    'http://127.0.0.1:5173'
+    'http://127.0.0.1:5173',
+    'https://aams-jeouttefp-nityapragatis-projects.vercel.app'
   ],
   // PostgreSQL config — supports both individual fields AND connection string
   DB: {

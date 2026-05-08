@@ -239,13 +239,13 @@ table.dt{width:100%;border-collapse:collapse}
 .modal-bg {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.58);
+  background: rgba(15,23,42,.58);
   backdrop-filter: blur(6px);
   display: flex;
-  align-items: center;
   justify-content: center;
+  align-items: flex-start;
+  padding-top: 60px;
   z-index: 9999;
-  animation: fadeIn .2s ease;
 }
 
 .modal-box {
@@ -255,7 +255,7 @@ table.dt{width:100%;border-collapse:collapse}
   max-height: 90vh;
   overflow: auto;
   box-shadow: var(--sh-xl);
-  margin-top: 100px;
+  margin-top: 150px;
 }
 
 .modal-head {

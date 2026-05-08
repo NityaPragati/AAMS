@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import Webcam from 'react-webcam';
 import { attendanceAPI } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { toast } from 'react-toastify';
@@ -8,8 +7,6 @@ import {
   FiCheckCircle,
   FiClock,
   FiHash,
-  FiRefreshCw,
-  FiXCircle
 } from 'react-icons/fi';
 
 const ScanQrAttendance = function() {
@@ -185,7 +182,7 @@ const ScanQrAttendance = function() {
       <div className="g-2col">
         <div className="card live-card">
           <div className="card-h">
-            <h3><FiCamera size={17} /> QR Scanner</h3>
+            <h3><FiCamera size={17} /> Attendance Code</h3>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <span className={'badge ' + (scanSupported ? 'b-ok' : 'b-warn')}>
                 {scanSupported ? 'Camera scan ready' : 'Manual fallback'}
@@ -194,51 +191,11 @@ const ScanQrAttendance = function() {
             </div>
           </div>
           <div className="card-b">
-            {!cameraOn ? (
-              <div className="cam-off">
-                <div className="cam-off-ic"><FiCamera size={44} /></div>
-                <h3>Scanner Off</h3>
-                <p>Open the camera and point it at the teacher's rotating QR code</p>
-                <button className="btn btn-p btn-lg" onClick={startScanner}>
-                  <FiCamera size={18} /> Start Scanner
-                </button>
-              </div>
-            ) : (
-              <div>
-                <div className="scanner-shell">
-                  <Webcam
-                    ref={webcamRef}
-                    audio={false}
-                    screenshotFormat="image/jpeg"
-                    screenshotQuality={0.82}
-                    videoConstraints={{ width: 720, height: 540, facingMode: { ideal: 'environment' } }}
-                    style={{ width: '100%', display: 'block' }}
-                  />
-                  <div className="face-corners searching">
-                    <span />
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                  <div className="cam-live">
-                    <div className="cam-live-dot" />
-                    <span>{scanning ? 'SCANNING' : 'PAUSED'}</span>
-                  </div>
-                  <div className="scan-status-panel">
-                    <strong>{message}</strong>
-                    <span>Codes refresh every 30 seconds</span>
-                  </div>
-                </div>
-                <div className="cam-ctrl">
-                  <button className="btn btn-s" onClick={stopScanner}>
-                    <FiXCircle size={16} /> Stop
-                  </button>
-                  <button className="btn btn-p" onClick={startScanner} disabled={busy}>
-                    <FiRefreshCw size={16} /> Retry
-                  </button>
-                </div>
-              </div>
-            )}
+            <div style={{ marginBottom: 10 }}>
+              <p style={{ color: 'var(--g500)', marginTop: 4 }}>
+                  Enter the attendance code provided by your teacher.
+              </p>
+          </div>
 
             <div style={{ marginTop: 20 }}>
               <label className="fl">Fallback code</label>

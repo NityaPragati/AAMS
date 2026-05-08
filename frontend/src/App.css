@@ -255,7 +255,6 @@ table.dt{width:100%;border-collapse:collapse}
   max-height: 90vh;
   overflow: auto;
   box-shadow: var(--sh-xl);
-  margin-top: 150px;
 }
 
 .modal-head {

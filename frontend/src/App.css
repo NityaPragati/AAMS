@@ -238,7 +238,10 @@ table.dt{width:100%;border-collapse:collapse}
 /* ===== MODAL ===== */
 .modal-bg {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
   background: rgba(15, 23, 42, 0.58);
   backdrop-filter: blur(6px);
   display: flex;
@@ -246,18 +249,16 @@ table.dt{width:100%;border-collapse:collapse}
   justify-content: center;
   z-index: 9999;
   animation: fadeIn .2s ease;
-  padding: 20px;
-  overflow-y: auto;
 }
 
 .modal-box {
   background: var(--w);
   border-radius: var(--r-lg);
   width: 90%;
+  max-width: 560px;
   max-height: 90vh;
   overflow-y: auto;
   box-shadow: var(--sh-xl);
-  margin: auto;
 }
 
 .modal-head {

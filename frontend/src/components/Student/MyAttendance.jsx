@@ -42,6 +42,9 @@ const MyAttendance = () => {
           <h1><FiClipboard style={{ marginRight: 10, color: 'var(--m500)' }} /> My Attendance</h1>
           <p>Welcome, {user?.full_name} ({user?.student_id})</p>
         </div>
+        <button className="btn btn-p" onClick={() => nav('/student/scan-qr')}>
+          <FiCamera size={16} /> Mark Attendance
+        </button>
       </div>
 
       {/* Low Attendance Warning */}

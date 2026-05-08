@@ -255,7 +255,7 @@ table.dt{width:100%;border-collapse:collapse}
   max-height: 90vh;
   overflow: auto;
   box-shadow: var(--sh-xl);
-  padding-top: 24px;
+  padding-top: 50px;
   margin: 0;
 }
 

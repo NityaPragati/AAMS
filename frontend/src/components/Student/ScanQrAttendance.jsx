@@ -140,23 +140,7 @@ const ScanQrAttendance = function() {
     };
   }, [cameraOn, clearScanLoop, detectFromShot, scanSupported, scanning, submitPayload]);
 
-  function startScanner() {
-    if (!scanSupported) {
-      toast.info('This browser cannot scan QR directly. Use the fallback code below.');
-      return;
-    }
-    setScanResult(null);
-    setCameraOn(true);
-    setScanning(true);
-    setMessage('Point your camera at the teacher QR code');
-  }
 
-  function stopScanner() {
-    clearScanLoop();
-    setCameraOn(false);
-    setScanning(false);
-    setMessage('Scanner paused');
-  }
 
   async function handleManualSubmit() {
     if (!manualCode.trim()) {

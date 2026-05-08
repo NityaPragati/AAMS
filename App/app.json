@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "AAMS Attendance",
+    "slug": "aams-attendance",
+    "scheme": "aamsattendance",
+    "version": "1.0.0",
+    "sdkVersion": "54.0.0",
+    "orientation": "portrait",
+    "icon": "./src/public/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./src/public/logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0f172a"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "plugins": [
+      "expo-camera",
+      "expo-asset"
+    ],
+    "android": {
+      "package": "com.aams.attendance",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "extra": {
+      "eas": {
+        "projectId": "b62cbe7f-455c-46b5-b700-dfb71c0b619c"
+      }
+    }
+  }
+}
